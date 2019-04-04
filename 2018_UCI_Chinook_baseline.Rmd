@@ -1,0 +1,638 @@
+---
+title: "2018_UCI_Chinook_baseline"
+author: "Andy Barclay"
+date: "February 1, 2019"
+output: html_document
+---
+This R Markdown documents the reanalysis of the Cook Inlet Chinook GTSeq SNP data.  The original baseline analysis with these data, located [here]("V:/Analysis/2_Central/Chinook/Cook Inlet/2018/Baseline/CI Chinook 478 SNP baseline"), was done over a couple months with many exploratory analyses that had dead ends becuse we used that baseline analysis a "Guinea Pig" for developing baseline evaluation tests using the rubias package.  Also, I was in the process of learing the tidyverse way of coding, so the previous analysis contains a mix of base and tidy code and was kind of messy. Addtionally, the rubias package was new was modified by Eric Anderson as we started using it.  Consequently, the code does not work properly with the updated verson of rubias.  
+
+The genotype data in LOKI has been updated since the previous basline analysis as we are now using Garrett McKinney's bioinformatic pipeline to produce the genotypes from the GTSeq data. Therefore, this analysis does not contain the exact genotypes and markers as the previous analysis.  
+
+##Set up workspace
+###Get functions and load tidy packages
+```{r workspace setup, echo=FALSE}
+
+source("C:\\Users\\awbarclay\\Documents\\R\\GitHubCloneFunctions.R")#GCL functions
+source("V:\\Analysis\\Staff\\Andy Barclay\\R\\New Functions\\WorkspaceFolders.GCL.R")#A function I wrote
+
+library("tidyverse")
+
+```
+
+###Create output folders 
+```{r create folders, echo=TRUE, message=FALSE}
+
+#WorkspaceFolders.GCL(Folders=c("output","objects","rubias","GENEPOP","FSTAT","GIS","GDA"),Subfolders=list(rubias=c("baseline","mixture","output")),wd=getwd())
+
+```
+
+###Data Retrieval and Quality Control
+Retrieving genotypes from LOKI and importing them into R with the RJDBC package (Urbanek 2018). 
+```{r locus control, echo=TRUE}
+
+#CreateLocusControl.GCL(markersuite = "UCI_Chinook_GTSeq_634SNPs", username ="awbarclay", password = password)#Locus control
+
+#sillyvec157 <- scan("objects/Baseline_Sillys.txt",what="")#Sillys ordered geographically
+
+#LOKI2R.GCL(sillyvec=sillyvec157,username="awbarclay",password)#Pull Data from LOKI
+
+#save.image("V:/Analysis/2_Central/Chinook/Cook Inlet/2018/Baseline/2018_UCI_Chinook_baseline/2018_UCI_Chinook_baseline.Rdata")
+
+load("V:/Analysis/2_Central/Chinook/Cook Inlet/2018/Baseline/2018_UCI_Chinook_baseline/2018_UCI_Chinook_baseline.Rdata")
+
+loci634 <- LocusControl$locusnames %>% sort()
+
+```
+##Quality Control Measures
+Creating a function to get sample sizes from *.gcl objects.
+```{r sample size function}
+
+SampSize<-function(sillyvec){
+  
+ as.character(sapply(paste(sillyvec,".gcl",sep=''), function(x) get(x)$n))
+  
+}
+
+```
+Get initial sample sizes. Some of the sample sizes are big becuause all individuals were pulled from LOKI and some samples were not analyzed for the GTSeq panels.
+```{r initial N, echo=FALSE}
+
+samples <- tibble(collection=sillyvec157,original=SampSize(sillyvec157))
+samples
+
+```
+Use the 80% rule (missing data at 20% or more of loci; Dann et al. 2009) to identify individuals missing substantial genotypic data and remove. This also removes individuals that weren't genotyped for all of the  
+```{r missing loci, echo = FALSE, }
+
+Missloci <- RemoveIndMissLoci.GCL(sillyvec=sillyvec157, proportion = 0.8)
+
+```
+Get sample sizes after removing individuals with missing data
+```{r post missloci N, echo = FALSE}
+
+samples$missloci <- SampSize(sillyvec157)
+samples
+
+```
+Check for individuals within collections that have the same genotypes (duplicate individuals)
+```{r duplicate check, echo = FALSE, include = FALSE}
+
+#Creating a temp sillyvec so only collections with more than 1 individual are checked for duplicates.
+sillyvec_temp <- samples %>%
+  filter(missloci > "1") %>% 
+  pull(collection)
+
+dupcheckNULLquantile<-CheckDupWithinSilly.GCL(sillyvec= sillyvec_temp,loci=loci634,quantile=NULL,minproportion=0.99)#Quantile NULL min proportion 0.99  
+
+dupcheckNULLquantile %>% 
+  modify("report") %>%
+  keep(~is_tibble(.x)) %>% 
+  bind_rows(.id="silly")
+
+```
+
+Remove 11 duplicate individuals
+```{r remove duplicates, echo = FALSE}
+
+removedDups<-RemoveDups.GCL(dupcheckNULLquantile)
+unlist(removedDups[!removedDups=="Nothing Removed"])#Gets the individuals removed from workspace
+
+```
+Remove individuals from the 2003 Kenai middle mainstem collection that are not baseline samples
+```{r remove non baseline, echo= FALSE}
+
+RemoveIDs.GCL(silly="KKENAI03",IDs= c(991:1000)) 
+
+```
+Get sample sizes after removing duplicate and non baseline individuals
+```{r post missloci N, echo = FALSE}
+
+samples$AfterDup <- SampSize(sillyvec157)
+samples
+
+write_excel_csv(samples,"output/Baseline_Samples.csv")
+
+```
+
+##Pooling
+Getting collection location names for inital pooling test
+```{r location names}
+
+Location_Names <- read_csv("data/Location_Names.csv")
+
+```
+The Crescent River and Rabbit Creek collections have sample sizes less than 50 and there are no other collections that they could potentially get pooled with. Also, removed a few collections with less than 2 samples, as they will make the Fishers tests for pooling bomb.
+```{r}
+
+Final_Samples <- samples %>% 
+  select(Silly=collection,N=missloci) %>% 
+  left_join(Location_Names,by="Silly") %>% 
+  mutate(N=as.numeric(N),Location=factor(Location,levels=unique(Location)),Group=factor(Group,levels=unique(Group))) %>% 
+  filter(!N<=1)
+
+Location_Samples <- Final_Samples %>% 
+  group_by(Location) %>% 
+  summarise(N=sum(N))
+
+Location_Samples %>% 
+  filter(N<50)
+
+```
+Create new samples and sillyvec objects without Crescent River and Rabbit Creek collections. Write csv and include in analysis summary workbook.
+```{r echo=FALSE}
+
+Samples152 <- Final_Samples %>% 
+  filter(!Location%in%c("Crescent River","Rabbit Creek")) %>% 
+  mutate(Location=factor(Location,levels=unique(Location)),Group=factor(Group,level=unique(Group)),Order=seq(length(Silly))) %>% 
+  select(Order,Silly,Location,Group,N) 
+
+  write_excel_csv(Samples152,path="output/Samples152.csv")
+
+Samples152
+
+```
+#Remove fixed loci
+There are 127 loci with where there minor allele occurs in less than 1% of genotypes
+```{r fixed loci}
+
+Freq <- FreqPop.GCL(Samples152$Silly,loci=loci634)
+
+Allele_Prop <- apply(Freq[,,"Allele 1"],2,sum)/(apply(Freq[,,"Allele 1"],2,sum)+apply(Freq[,,"Allele 2"],2,sum)) 
+
+Invariant_loci <- tibble(Locus=loci634,Prop=Allele_Prop)%>%
+  filter(Prop<0.01|Prop>0.99)
+
+loci507 <- loci634[-match(Invariant_loci$Locus,loci634)]
+
+Invariant_loci
+
+```
+##Check sample size by locus to see if there any loci with a lot of missing data
+14 loci have no data for some sillys
+Ots_RAD1507 and Ots_RAD3752 have no data at all
+
+Ots_RAD10099, Ots_uwRAD13045.36, and Ots_uwRAD20292.90 have no data for 12-16 sillys
+
+Ots_uwRAD13045.83 has no data for 7 sillys
+
+```{r samp size by locus}
+TotalN<-as.numeric(SampSize(sillyvec=Samples152$Silly))
+
+SampSizeByLoc <- SampSizeByLocus.GCL(sillyvec = Samples152$Silly,loci=loci507) %>% 
+  set_names(loci507) %>% 
+  as_tibble(rownames = "Silly") %>% 
+  mutate(TotalN=TotalN)%>%
+  gather(key="Locus",value ="N",-Silly,-TotalN) 
+
+Zeros <- SampSizeByLoc %>% 
+  filter(N==0) %>% 
+  group_by(Locus) %>% 
+  summarize(Zeros=length(Locus)) %>% 
+  ungroup()
+
+Zeros
+
+```
+#Plot the poportion of fish with scores in a heatmap for loci that have pops without scores and include one very sucessful locus (GTH2B.550) for scale
+Two loci look okay, but some pops have pretty low sucess rates.  Drop all 14 loci with missing data from the analysis.
+```{r fig.height=20, fig.width=50}
+
+SucessRate <- SampSizeByLoc %>% 
+  group_by(Locus) %>% 
+  mutate(SucessRate=N/TotalN)
+ 
+SucessRate %>% 
+  filter(Locus%in%c("GTH2B-550",Zeros$Locus)) %>% 
+  ggplot(aes(Silly,Locus))+
+  geom_tile(aes(fill=SucessRate)) +
+  scale_fill_gradient(low = "white",high = "steelblue")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ 
+```
+##New locus object
+
+```{r}
+
+loci493 <- loci507[-match(Zeros$Locus,loci507)]
+
+```
+
+###Pooling Round 1
+####Setup
+Testing for pooling collections collected at the same location from different years.  The tests for Coal Creek, Troublesome Creek, Grank Creek, Quartz Creek, Russian River, Kenai middle mainstem, and Crooked Creek are all below the 0.01 p-value cutoff. Pool all temporal collections and check to see if the combined collection does not violate HW expectations.
+```{r tests 1}
+
+test_names <- Samples152 %>% 
+  group_by(Location) %>% 
+  summarize(N_Collections=length(Location)) %>% 
+  filter(N_Collections>1) %>% 
+  pull(Location)
+
+test_groups <- Samples152 %>% 
+  group_by(Location) %>% 
+  summarize(N_Collections=length(Location),Group=unique(Group)) %>% 
+  filter(N_Collections>1) %>% 
+  pull(Group)
+
+Tests1 <- sapply(test_names,function(loc){
+  
+  filter(Samples152,Location==loc) %>% pull(Silly)
+  
+  })
+
+Test_order<-Samples152 %>% 
+  filter(Silly %in% sapply(seq(length(Tests1)),function(test){Tests1[[test]][1]})) %>% 
+  pull(Order)
+
+Tests1_results<-FishersTest.GCL(freq=FreqPop.GCL(Samples152$Silly,loci=loci493), loci=loci493,test =Tests1)
+
+Test1_overall<-Tests1_results$OverallResults %>% 
+  as_tibble(rownames="Test") %>% 
+  mutate(Location=factor(test_names,levels=levels(Samples152$Location)),Order=Test_order,Group=test_groups) %>% 
+  write_excel_csv(path="output/Fishers_Test1_overall.csv")
+
+Test1_overall%>% 
+  filter(overall<0.01)
+
+```
+####Pool Collections
+These are the new collections after pooling temporal collections
+```{r pool temporal collections, echo=FALSE, results='hide'}
+
+trash<-lapply((1:length(Tests1)),function(x){PoolCollections.GCL(Tests1[[x]], loci=loci634, IDs = NULL, newname = paste(Tests1[[x]],collapse = "."))})
+
+Samples70 <- Samples152 %>% 
+  full_join(Test1_overall,by=c("Location"="Location","Silly"="Test","Order"="Order","Group"="Group")) %>% 
+  filter(!Silly%in%unlist(Tests1)) %>% 
+  arrange(Location) %>% 
+  mutate(N=SampSize(Silly),Order=seq(length(Silly))) %>% 
+  select(-overall) %>% 
+  write_excel_csv(path="Output/Samples70.csv")
+
+sillyvec70 <- Samples70%>% 
+  pull(Silly)
+
+Samples70
+ 
+```
+####Check HWE by locus and collection
+Checking Hardy-Weinberg equilibrium in GENEPOP for the new set of pooled collections
+```{r Pooling 1 HWE Check}
+
+gcl2Genepop.GCL(sillyvec=sillyvec70,loci493,path="GENEPOP/CI70pops493loci.gen")
+
+HWE70pops<-ReadGenepopHWE.GCL(file="GENEPOP/CI70pops493loci.P")
+
+HWE70pops_summary <- as_tibble(HWE70pops$SummaryPValues) %>% 
+  set_names(c(Sillyvec70,"Overall_Pops")) %>% 
+  mutate(locus=c(loci493,"0verall_Loci")) 
+
+HWE70pops_summary%>% 
+  write_excel_csv(path="output/HWE70pops_summary.csv")
+
+HWE70pops_summary
+
+```
+15 loci were out of HWE overall pops after adjusting for multiple tests
+```{r Pooling 1 HWE locus check}
+
+LociOut<-HWE70pops_summary %>% 
+  filter(`Overall_Pops` < 0.05/length(sillyvec70)) %>% 
+  pull(locus) 
+
+loci478 <- loci493[-match(LociOut,loci493,nomatch = 0)]
+
+LociOut
+
+```
+The 2009 Ship Creek collection is out of HWE.
+```{r Pooling 1 HWE pop check}
+
+PopsOut<-Sillyvec70[HWE70pops_summary %>% 
+    
+   filter(locus=="0verall_Loci")<0.05/length(loci493)]
+
+PopsOut
+
+```
+
+#####Checking KSHIP09 collection to see what's going on.
+Create genepop file to convert to structure file to check the Ship Creek collection individuals.  Structure results are inconslusive
+```{r structure check}
+
+gcl2Genepop.GCL(sillyvec="KSHIP09",loci=loci478,path="GENEPOP/ShipCr2009.gen")
+
+```
+After reviewing the note in LOKI for KSHIP09, I found out that Deception Creek was sampled along with the Ship Creek samples. The Ship Creek individuals were genotyped from 4 extraction plates.  Plate 8259 is the only extraction that contains only Ship Creek individuals. 
+```{r samples by plateID}
+
+KSHIP09.gcl$attributes$PLATE_ID %>% table
+
+```
+Use PoolCollections to create individal .gcl objects for KSHIP09 extraction plates and check HWE with GENEPOP
+```{r pool extraction plates}
+
+sapply(KSHIP09.gcl$attributes$PLATE_ID %>% unique,function(plate){
+  
+ IDs <- KSHIP09.gcl$attributes %>% 
+  filter(PLATE_ID==plate) %>% 
+  pull(FK_FISH_ID) %>% 
+  as.character() %>% 
+  list()
+ 
+ PoolCollections.GCL(collections="KSHIP09",loci=loci634,IDs=IDs,newname = paste0("KSHIP09_",plate))
+ 
+})
+
+
+#gcl2Genepop.GCL(sillyvec=c("KSHIP09_8256","KSHIP09_8257","KSHIP09_8258","KSHIP09_8259"),loci=loci478,path="GENEPOP/KSHIP09_byplate.gen")
+
+```
+One Ship Creek extraction plate is out of HWE: plate 8258
+```{r check extaction HWE}
+
+HWEShIpByPlate<-ReadGenepopHWE.GCL(file="GENEPOP/KSHIP09_byplate.P")
+
+HWEShIpByPlate$SummaryPValues["Overall Loci",]
+
+```
+Test for pooling for each pair of Ship Creek plates.
+Tests with extraction plate 8256 have lower fishers p-values.  Pool plates 8257 and 8259 and check HWE
+```{r Ship Creek combined extactions Fhisher's Tests}
+
+Ship_frq <- FreqPop.GCL(c("KSHIP09_8256","KSHIP09_8257","KSHIP09_8259"),loci = loci478)
+
+Ship_fishers<-FishersTest.GCL(freq=Ship_frq,loci=loci478,tests=
+                  list(
+                    c("KSHIP09_8256","KSHIP09_8257"),
+                    c("KSHIP09_8256","KSHIP09_8259"),
+                    c("KSHIP09_8257","KSHIP09_8259"))
+)
+
+Ship_fishers$OverallResults              
+
+```
+Pooling Ship Creek plates 8257 and 8259, then redo HWE in Genepop for sillyvec70 after overwriting KSHIP09 with KSHIP09_8257_8259 and using the reduced locus set loci478
+```{r Ship Creek HWE check}
+
+KSHIP09_old.gcl<-KSHIP09.gcl
+
+PoolCollections.GCL(collections=c("KSHIP09_8257","KSHIP09_8259"),loci=loci634,newname="KSHIP09")
+
+
+#gcl2Genepop.GCL(sillyvec=sillyvec70,loci=loci478,path="GENEPOP/CI70pops478loci.gen")
+
+HWECI70pops478loci <-ReadGenepopHWE.GCL(file="GENEPOP/CI70pops478loci.P")
+
+HWE70pops478loci_summary <- as_tibble(HWECI70pops478loci$SummaryPValues) %>% 
+  set_names(c(Sillyvec70,"Overall_Pops")) %>% 
+  mutate(locus=c(loci478,"0verall_Loci")) 
+
+HWE70pops478loci_summary%>% 
+  write_excel_csv(path="output/HWE70pops478loci_summary.csv")
+
+HWE70pops478loci_summary
+
+```
+Ots_IL-1RA is out of HWE
+```{r HWE locus check}
+
+LociOut<-HWE70pops478loci_summary %>% 
+  filter(`Overall_Pops` < 0.05/length(Sillyvec70)) %>% 
+  pull(locus) 
+
+loci477 <- loci478[-match(LociOut,loci478,nomatch = 0)]
+
+LociOut
+
+```
+No pops are out if HWE now
+```{r HWE pop check}
+
+PopsOut<-Sillyvec70[HWE70pops478loci_summary %>% 
+    
+   filter(locus=="0verall_Loci")<0.05/length(loci478)]
+
+PopsOut
+
+```
+
+
+```{r 70 pop tree, fig.height=10, fig.width=6}
+
+source("ReadGenepopPW_FST.R")#I wrote this function to read in GENEPOP pairwise Fst matricies from .MIG files and create a named symetric matrix.
+
+treenames70 <- Samples70$Location
+
+Fst70 <-ReadGenepopPW_FST(file="GENEPOP/CI70pops478loci.MIG",locname=treenames70)
+
+FstTree<-ape::nj(Fst70)
+
+groupvec<-factor(Samples70$Group,levels=unique(Samples70$Group)) %>% 
+  as.numeric()
+
+grcol<-c("blue","green","yellow","red","orange","magenta","cyan","darkcyan","gray","brown")
+
+FstTree$edge.length=pmax(0,FstTree$edge.length) #Get rid of negative branches  
+
+colortree<-treeColor.GCL(tree=FstTree,currentnames=FstTree$tip.label,treenames = FstTree$tip.label,groupvec=groupvec,regioncol = match(grcol,colors()))
+
+ape::plot.phylo(x=colortree$tree,edge.color=colortree$color,edge.width=3,use.edge.length=T,show.tip.label=T,adj=.02,cex=.7,font=1,label.offset=0.001)
+
+axis(1)  #Adds scale to bottom of plot
+mtext(text=expression(italic(F)[ST]),side=1,cex=1.5,outer=F,line=3)
+
+
+```
+###Pooling Round 2
+####Setup
+Testing Red Salmon Creek and Happy River, Quartz and Daves creeks, and Moose Creek (Deshka) and Deshka River for pooling. Deep Creek is below 50 samples (n=40) and could probably be pooed with Ninilchik River; however, it has always been included as it's own pop in previous baselines and it fits correctly in the tree, so I won't pool it here and it will be included in this baseline dispite its low sample size.  
+
+Happy River and Red Salmon Creek are poolable, but not Quartz and Daves creeks. 
+```{r tests 2}
+
+Tests2 <- list(Samples70 %>% 
+  filter(Location%in%c("Red Salmon Creek","Happy River")) %>% 
+         pull(Silly),
+Samples70 %>% 
+  filter(Location%in%c("Quartz Creek","Daves Creek")) %>% 
+         pull(Silly),
+Samples70 %>% 
+  filter(Location%in%c("Moose Creek (Deshka)","Deshka River")) %>% 
+         pull(Silly))
+    
+
+Tests2_results<-FishersTest.GCL(freq=FreqPop.GCL(unlist(Tests2),loci=loci477), loci=loci477,test =Tests2)
+
+Test2_overall<-Tests2_results$OverallResults %>% 
+  as_tibble(rownames="Test") %>% 
+  mutate(Location=factor(c("Happy River","Quartz Creek","Deshka River"),levels=c("Happy River","Quartz Creek","Deshka River")),Order=c(34,52,32),Group=c("Yentna","KenaiTrib","Deshka")) 
+
+  write_excel_csv(Test2_overall,path="output/Fishers_Test2_overall.csv")
+
+Test2_overall
+
+```
+#Pool Happy River and Red Salmon Creek and the Deshka River collections, Drop Daves Creek.
+```{r final pooling}
+
+PoolCollections.GCL(collections = Tests2[[1]],loci = loci634)
+PoolCollections.GCL(collections = Tests2[[3]],loci = loci634)
+
+
+Samples67 <- Samples70 %>% 
+  filter(!Location%in%c("Daves Creek","Red Salmon Creek","Moose Creek (Deshka)")) %>% 
+  mutate(Location=factor(Location,levels=unique(Location)),Group=factor(Group,levels=levels(Samples152$Group)),Order=1:length(Silly),Silly=sub(pattern="KHAPPY12",replacement="KHAPPY12.KREDSAC12.KREDSAC14",x=Silly)) %>% 
+  mutate(Silly=sub(pattern="KDESH05.KDESH15",replacement="KMOOD95.KMOOD12.KDESH05.KDESH15",x=Silly)) %>% 
+  mutate(N=SampSize(Silly))
+
+write_excel_csv(x=Samples67,path="Output/Samples67.csv")
+
+sillyvec67 <- Samples67$Silly
+
+```
+##HWE Check
+```{r dump GENEPOP}
+
+gcl2Genepop.GCL(sillyvec = sillyvec67,loci=loci477,path="GENEPOP/CI67pops477loci.gen")
+
+```
+```{r final HW check}
+
+HWECI67pops477loci <-ReadGenepopHWE.GCL(file="GENEPOP/CI67pops477loci.P")
+
+HWECI67pops477loci_summary <- as_tibble(HWECI67pops477loci$SummaryPValues) %>% 
+  set_names(c(sillyvec67,"Overall_Pops")) %>% 
+  mutate(locus=c(loci477,"0verall_Loci")) 
+
+HWECI67pops477loci_summary%>% 
+  write_excel_csv(path="output/HWE67pops477loci_summary.csv")
+
+HWECI67pops477loci_summary
+
+```
+"Ots_uwRAD62017-76" and "Ots_uwRAD73140-86" are out of HWE drop these.
+```{r HWE locus check}
+
+LociOut<-HWECI67pops477loci_summary %>% 
+  filter(`Overall_Pops` < 0.05/length(sillyvec67)) %>% 
+  pull(locus) 
+
+loci475 <- loci477[-c(match(LociOut[1],loci478,nomatch = 0),match(LociOut[2],loci478,nomatch = 0))]
+
+LociOut
+
+```
+No pops are out if HWE
+```{r HWE pop check}
+
+PopsOut<-sillyvec67[HWECI67pops477loci_summary %>% 
+    
+   filter(locus=="0verall_Loci")<0.05/length(loci477)]
+
+PopsOut
+
+```
+##Dump GENEPOP file for Genotypic Disequillibrium tests
+```{r dump GENEPOP}
+
+gcl2Genepop.GCL(sillyvec = sillyvec67,loci=loci475,path="GENEPOP/CI67pops475loci.gen")
+
+```
+
+I can't figure out why Moose Creek (Matanuska) is green
+```{r 67 pop tree, fig.height=10, fig.width=6}
+
+source("ReadGenepopPW_FST.R")#I wrote this function to read in GENEPOP pairwise Fst matricies from .MIG files and create a named symetric matrix.
+
+treenames67 <- as.character(Samples67$Location)
+treenames67[41] <- "Moose Creek"
+
+Fst67 <-ReadGenepopPW_FST(file="GENEPOP/CI67pops475loci.MIG",locname=treenames67)
+
+FstTree<-ape::nj(Fst67)
+
+groupvec<-factor(Samples67$Group,levels=unique(Samples67$Group)) %>% 
+  as.numeric()
+grcol<-c("blue","green","yellow","red","orange","magenta","cyan","darkcyan","gray","brown")
+
+FstTree$edge.length=pmax(0,FstTree$edge.length) #Get rid of negative branches  
+
+colortree<-treeColor.GCL(tree=FstTree,currentnames=FstTree$tip.label,treenames = FstTree$tip.label,groupvec=groupvec,regioncol = match(grcol,colors()))
+
+#colortree$color[103] <- "orange" #Had to manually color Moose Creek, not sure what's wrong with the colortree function.
+
+ape::plot.phylo(x=colortree$tree,edge.color=colortree$color,edge.width=3,use.edge.length=T,show.tip.label=T,adj=.02,cex=.7,font=1,label.offset=0.001)
+
+axis(1)  #Adds scale to bottom of plot
+mtext(text=expression(italic(F)[ST]),side=1,cex=1.5,outer=F,line=3)
+
+
+```
+##Linkage Disequillibrium
+Dump GENEPOP files with fewer pops so things run faster.  The results of these will be combined in the final LD summary object.
+```{r disequillibrium files}
+
+#Dump GENEPOP files with fewer pops so things run faster
+
+choose(length(loci475),2)*5;length(sillyvec67)/5#Try ~5 pops per file, about 500K tests per file (13 files), run these on the server (GEN4)
+
+loci <- loci475
+sillyvec <- sillyvec67
+start<-as.list(seq (1,length(sillyvec),5)) 
+
+for(i in 1:13){
+  
+ if(i<13){
+   
+   gcl2Genepop.GCL(sillyvec=sillyvec[seq(start[[i]],start[[i]]+4)],path=paste0("GENEPOP/LD files/Pops",start[[i]],"to",start[[i]]+4,"LD.gen"),loci=loci)
+   
+ } else{ gcl2Genepop.GCL(sillyvec=sillyvec[seq(start[[i]],start[[i]]+6)],path=paste0("GENEPOP/LD files/Pops",start[[i]],"to",start[[i]]+5,"LD.gen"),loci=loci)}
+
+}
+
+```
+
+```{r LD summary}
+
+#Summarized GENEPOP LD output
+files<-list.files("Genepop/LD files",pattern=".DIS",full.names = T)
+
+#Summarize LD output
+
+LDsummary<-lapply(files,function(file){ReadGenepopDis.GCL(file=file)})#Summaries for all LD genepop files
+
+LDsummary<-bind_cols(LDsummary) %>% 
+  as_tibble()#put in 1 data frame
+
+LDsummary
+
+```
+
+
+
+```{r HWE locus check}
+
+LociOut<-HWECI68pops477loci_summary %>% 
+  filter(`Overall_Pops` < 0.05/length(sillyvec68)) %>% 
+  pull(locus) 
+
+
+
+LociOut
+
+```
+No pops are out if HWE now
+```{r HWE pop check}
+
+PopsOut<-Sillyvec70[HWE70pops478loci_summary %>% 
+    
+   filter(locus=="0verall_Loci")<0.05/length(loci478)]
+
+PopsOut
+
+```
+
+
+
+
